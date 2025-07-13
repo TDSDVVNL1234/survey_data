@@ -1,8 +1,5 @@
-# ✅ FIXED VERSION: Streamlit app with Google Sheets + Drive integration WITHOUT PyDrive
-
 import streamlit as st
 import pandas as pd
-import os
 from datetime import datetime
 import io
 from PIL import Image
@@ -12,50 +9,42 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 import gspread
 
-# --- Google Setup ---
-CREDENTIALS_FILE = 'credentials.json'
+# --- Setup ---
 GOOGLE_SHEET_ID = '1UGrGEtWy5coI7nduIY8J8Vjh9S0Ahej7ekDG_4nl-SQ'
 DRIVE_FOLDER_ID = '1l6N7Gfd8T1V8t3hR2OuLn5CDtBuzjsKu'
 
-SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
-creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
+# --- Load credentials from Streamlit secrets ---
+creds = Credentials.from_service_account_info(
+    st.secrets["gcp_service_account"],
+    scopes=["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
+)
 
-# --- Google Drive Setup ---
-drive_service = build("drive", "v3", credentials=creds)
-
-# --- Google Sheets Setup ---
+# --- Google APIs ---
 gs_client = gspread.authorize(creds)
 sheet = gs_client.open_by_key(GOOGLE_SHEET_ID).sheet1
+drive_service = build("drive", "v3", credentials=creds)
 
-# --- Load Local CSV for ACCT_ID Validation ---
-input_file = 'IDF_ACCT_ID.csv'
-df = pd.read_csv(input_file)
+# --- Load Master CSV ---
+df = pd.read_csv("IDF_ACCT_ID.csv")
 
-# --- UI Starts ---
+# --- Streamlit UI ---
 st.title("Supervisor Field Survey – IDF Cases")
-st.caption("Please fill this form after on-site verification of IDF accounts.")
-
 acct_id_input = st.text_input("**ENTER ACCT_ID**", max_chars=10)
-if acct_id_input and not acct_id_input.isdigit():
-    st.error("❌ ACCT_ID should be numeric only.")
 
-if acct_id_input:
+if acct_id_input and acct_id_input.isdigit():
     match = df[df["ACCT_ID"].astype(str) == acct_id_input.strip()]
 
     if not match.empty:
-        st.success("✅ ACCT_ID matched. Details below:")
+        st.success("✅ ACCT_ID matched.")
+
         fields = {
             "ZONE": match.iloc[0]["ZONE"],
             "CIRCLE": match.iloc[0]["CIRCLE"],
             "DIVISION": match.iloc[0]["DIVISION"],
             "SUB-DIVISION": match.iloc[0]["SUB-DIVISION"]
         }
-
-        cols = st.columns(len(fields))
-        for col, (label, value) in zip(cols, fields.items()):
-            col.markdown(f"<b>{label}:</b><br>{value}", unsafe_allow_html=True)
-
-        st.markdown("---")
+        for k, v in fields.items():
+            st.write(f"**{k}:** {v}")
 
         remark_options = {
             "OK": ["METER SERIAL NUMBER", "METER IMAGE", "READING", "DEMAND"],
@@ -67,7 +56,7 @@ if acct_id_input:
         selected_remark = st.selectbox("Select REMARK", [""] + list(remark_options.keys()))
 
         if selected_remark:
-            mobile_no = st.text_input("Enter Consumer Mobile Number (10 digits)", max_chars=10)
+            mobile_no = st.text_input("Mobile Number", max_chars=10)
             input_data = {}
             uploaded_links = {}
 
@@ -77,7 +66,7 @@ if acct_id_input:
                     if image:
                         filename = f"{acct_id_input}_{field.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
                         media = MediaIoBaseUpload(image, mimetype='image/png')
-                        uploaded_file = drive_service.files().create(
+                        uploaded = drive_service.files().create(
                             media_body=media,
                             body={
                                 'name': filename,
@@ -86,7 +75,7 @@ if acct_id_input:
                             },
                             fields='id, webViewLink'
                         ).execute()
-                        uploaded_links[field] = uploaded_file.get("webViewLink")
+                        uploaded_links[field] = uploaded.get("webViewLink")
                 else:
                     value = st.text_input(field)
                     input_data[field.replace(" ", "_").upper()] = value
@@ -109,6 +98,6 @@ if acct_id_input:
                     uploaded_links.get("DOCUMENT RELATED TO PDC", "")
                 ]
                 sheet.append_row(row)
-                st.success("🎉 Data submitted and saved to Google Sheet + Drive!")
+                st.success("🎉 Data submitted successfully!")
     else:
-        st.error("❌ ACCT_ID not found. Please check and try again.")
+        st.error("❌ ACCT_ID not found.")
