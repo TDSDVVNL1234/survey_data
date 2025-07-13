@@ -3,7 +3,6 @@ import pandas as pd
 from datetime import datetime
 import io
 from PIL import Image
-
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -27,106 +26,120 @@ sheet = sheet_client.open_by_key(GOOGLE_SHEET_ID).sheet1
 drive_service = build("drive", "v3", credentials=creds)
 
 # --- Load Master CSV ---
-df = pd.read_csv(INPUT_CSV)
+try:
+    df = pd.read_csv(INPUT_CSV)
+    # Ensure ACCT_ID is treated as string for comparison
+    df["ACCT_ID"] = df["ACCT_ID"].astype(str).str.strip()
+except Exception as e:
+    st.error(f"Failed to load CSV file: {e}")
+    st.stop()
 
 # --- UI Starts ---
 st.title("Supervisor Field Survey – IDF Cases")
 st.caption("Please fill this form after on-site verification of IDF accounts.")
 
-acct_id = st.text_input("*ENTER ACCT_ID*", max_chars=10)
-
-if acct_id and not acct_id.isdigit():
-    st.error("❌ ACCT_ID should be numeric only.")
+acct_id = st.text_input("*ENTER ACCT_ID*", max_chars=10).strip()
 
 if acct_id:
-    match = df[df["ACCT_ID"].astype(str) == acct_id.strip()]
-    if match.empty:
-        st.error("❌ ACCT_ID not found.")
+    # Validate ACCT_ID format
+    if not acct_id.isdigit():
+        st.error("❌ ACCT_ID should be numeric only.")
     else:
-        st.success("✅ ACCT_ID matched!")
-        fields = {
-            "ZONE": match.iloc[0]["ZONE"],
-            "CIRCLE": match.iloc[0]["CIRCLE"],
-            "DIVISION": match.iloc[0]["DIVISION"],
-            "SUB-DIVISION": match.iloc[0]["SUB-DIVISION"]
-        }
+        # Find matching account
+        match = df[df["ACCT_ID"] == acct_id]
+        if match.empty:
+            st.error("❌ ACCT_ID not found.")
+        else:
+            st.success("✅ ACCT_ID matched!")
+            fields = {
+                "ZONE": match.iloc[0]["ZONE"],
+                "CIRCLE": match.iloc[0]["CIRCLE"],
+                "DIVISION": match.iloc[0]["DIVISION"],
+                "SUB-DIVISION": match.iloc[0]["SUB-DIVISION"]
+            }
 
-        cols = st.columns(len(fields))
-        for col, (label, value) in zip(cols, fields.items()):
-            col.markdown(f"*{label}*: {value}")
+            cols = st.columns(len(fields))
+            for col, (label, value) in zip(cols, fields.items()):
+                col.markdown(f"*{label}*: {value}")
 
-        st.markdown("---")
+            st.markdown("---")
 
-        remark_options = {
-            "OK": ["METER SERIAL NUMBER", "METER IMAGE", "READING", "DEMAND"],
-            "DEFECTIVE METER": ["METER SERIAL NUMBER", "METER IMAGE"],
-            "NO METER AT SITE": ["PREMISES IMAGE"],
-            "PDC": ["METER IMAGE", "PREMISES IMAGE", "DOCUMENT RELATED TO PDC"]
-        }
+            remark_options = {
+                "OK": ["METER SERIAL NUMBER", "METER IMAGE", "READING", "DEMAND"],
+                "DEFECTIVE METER": ["METER SERIAL NUMBER", "METER IMAGE"],
+                "NO METER AT SITE": ["PREMISES IMAGE"],
+                "PDC": ["METER IMAGE", "PREMISES IMAGE", "DOCUMENT RELATED TO PDC"]
+            }
 
-        selected_remark = st.selectbox("Select REMARK", [""] + list(remark_options.keys()))
+            selected_remark = st.selectbox("Select REMARK", [""] + list(remark_options.keys()))
 
-        if selected_remark:
-            mobile_no = st.text_input("Enter Consumer Mobile Number", max_chars=10)
-            input_data = {}
-            image_links = {}
+            if selected_remark:
+                mobile_no = st.text_input("Enter Consumer Mobile Number", max_chars=10)
+                input_data = {}
+                image_links = {}
 
-            for field in remark_options[selected_remark]:
-                if "IMAGE" in field or "DOCUMENT" in field:
-                    uploaded = st.file_uploader(f"Upload {field}", type=["png", "jpg", "jpeg"], key=field)
-                    if uploaded:
-                        filename = f"{acct_id}{field.replace(' ', '')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-                        media = MediaIoBaseUpload(uploaded, mimetype='image/png')
-                        try:
-                            file = drive_service.files().create(
-                                media_body=media,
-                                body={'name': filename, 'parents': [DRIVE_FOLDER_ID]},
-                                fields='webViewLink'
-                            ).execute()
-                            image_links[field] = file.get("webViewLink")
-                        except Exception as e:
-                            st.error(f"⚠️ Failed to upload {field}: {e}")
-                else:
-                    val = st.text_input(field)
-                    input_data[field.replace(" ", "_").upper()] = val
-
-            if st.button("✅ Submit"):
-                # --- Validation ---
-                errors = []
-                if not mobile_no:
-                    errors.append("Mobile number is required.")
                 for field in remark_options[selected_remark]:
-                    if "IMAGE" not in field and "DOCUMENT" not in field:
-                        key = field.replace(" ", "_").upper()
-                        if not input_data.get(key):
-                            errors.append(f"{field} is required.")
+                    if "IMAGE" in field or "DOCUMENT" in field:
+                        uploaded = st.file_uploader(f"Upload {field}", type=["png", "jpg", "jpeg"], key=field)
+                        if uploaded:
+                            try:
+                                # Verify it's an image
+                                Image.open(uploaded)
+                                filename = f"{acct_id}{field.replace(' ', '')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{uploaded.name.split('.')[-1]}"
+                                media = MediaIoBaseUpload(io.BytesIO(uploaded.getvalue()), mimetype=uploaded.type)
+                                file = drive_service.files().create(
+                                    media_body=media,
+                                    body={'name': filename, 'parents': [DRIVE_FOLDER_ID]},
+                                    fields='webViewLink'
+                                ).execute()
+                                image_links[field] = file.get("webViewLink")
+                            except Exception as e:
+                                st.error(f"⚠️ Failed to process {field}: {e}")
+                    else:
+                        val = st.text_input(field)
+                        if val:
+                            input_data[field.replace(" ", "_").upper()] = val.strip()
 
-                if errors:
-                    for e in errors:
-                        st.error("❌ " + e)
-                else:
-                    row = [
-                        acct_id,
-                        selected_remark,
-                        fields["ZONE"],
-                        fields["CIRCLE"],
-                        fields["DIVISION"],
-                        fields["SUB-DIVISION"],
-                        mobile_no,
-                        "",  # Optional Remarks
-                        input_data.get("METER_SERIAL_NUMBER", ""),
-                        input_data.get("READING", ""),
-                        input_data.get("DEMAND", ""),
-                        image_links.get("METER IMAGE", ""),
-                        image_links.get("PREMISES IMAGE", ""),
-                        image_links.get("DOCUMENT RELATED TO PDC", "")
-                    ]
+                if st.button("✅ Submit"):
+                    # --- Validation ---
+                    errors = []
+                    if not mobile_no or not mobile_no.isdigit() or len(mobile_no) != 10:
+                        errors.append("Valid 10-digit mobile number is required.")
+                    
+                    for field in remark_options[selected_remark]:
+                        if "IMAGE" not in field and "DOCUMENT" not in field:
+                            key = field.replace(" ", "_").upper()
+                            if not input_data.get(key):
+                                errors.append(f"{field} is required.")
+                        else:
+                            if field not in image_links:
+                                errors.append(f"{field} is required.")
 
-                    # Optional debug output
-                    st.write("✅ Row to be saved:", row)
+                    if errors:
+                        for e in errors:
+                            st.error("❌ " + e)
+                    else:
+                        row = [
+                            acct_id,
+                            selected_remark,
+                            fields["ZONE"],
+                            fields["CIRCLE"],
+                            fields["DIVISION"],
+                            fields["SUB-DIVISION"],
+                            mobile_no,
+                            "",  # Optional Remarks
+                            input_data.get("METER_SERIAL_NUMBER", ""),
+                            input_data.get("READING", ""),
+                            input_data.get("DEMAND", ""),
+                            image_links.get("METER IMAGE", ""),
+                            image_links.get("PREMISES IMAGE", ""),
+                            image_links.get("DOCUMENT RELATED TO PDC", ""),
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Timestamp
+                        ]
 
-                    try:
-                        sheet.append_row(row)
-                        st.success("🎉 Data saved to Google Sheet & images uploaded to Drive!")
-                    except Exception as e:
-                        st.error(f"❌ Failed to save to Google Sheet: {e}")
+                        try:
+                            sheet.append_row(row)
+                            st.success("🎉 Data saved to Google Sheet & images uploaded to Drive!")
+                            st.balloons()
+                        except Exception as e:
+                            st.error(f"❌ Failed to save to Google Sheet: {e}")
