@@ -6,6 +6,3 @@ google-auth-oauthlib
 google-auth-httplib2
 pydrive
 Pillow
-os
-datetime
-io
