@@ -2,11 +2,13 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 import io
+import time
 from PIL import Image
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from googleapiclient.errors import HttpError
 
 # --- CONFIG ---
 GOOGLE_SHEET_ID = '1UGrGEtWy5coI7nduIY8J8Vjh9S0Ahej7ekDG_4nl-SQ'
@@ -14,24 +16,31 @@ DRIVE_FOLDER_ID = '1l6N7Gfd8T1V8t3hR2OuLn5CDtBuzjsKu'
 INPUT_CSV = 'IDF_ACCT_ID.csv'
 
 # --- Auth from st.secrets ---
-creds_dict = st.secrets["google_service_account"]
-creds = Credentials.from_service_account_info(creds_dict, scopes=[
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-])
+try:
+    creds_dict = st.secrets["google_service_account"]
+    creds = Credentials.from_service_account_info(creds_dict, scopes=[
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ])
+except Exception as auth_error:
+    st.error(f"Authentication failed: {auth_error}")
+    st.stop()
 
 # --- Setup Clients ---
-sheet_client = gspread.authorize(creds)
-sheet = sheet_client.open_by_key(GOOGLE_SHEET_ID).sheet1
-drive_service = build("drive", "v3", credentials=creds)
+try:
+    sheet_client = gspread.authorize(creds)
+    sheet = sheet_client.open_by_key(GOOGLE_SHEET_ID).sheet1
+    drive_service = build("drive", "v3", credentials=creds)
+except Exception as client_error:
+    st.error(f"Client setup failed: {client_error}")
+    st.stop()
 
 # --- Load Master CSV ---
 try:
     df = pd.read_csv(INPUT_CSV)
-    # Ensure ACCT_ID is treated as string for comparison
     df["ACCT_ID"] = df["ACCT_ID"].astype(str).str.strip()
-except Exception as e:
-    st.error(f"Failed to load CSV file: {e}")
+except Exception as csv_error:
+    st.error(f"Failed to load CSV file: {csv_error}")
     st.stop()
 
 # --- UI Starts ---
@@ -41,11 +50,9 @@ st.caption("Please fill this form after on-site verification of IDF accounts.")
 acct_id = st.text_input("*ENTER ACCT_ID*", max_chars=10).strip()
 
 if acct_id:
-    # Validate ACCT_ID format
     if not acct_id.isdigit():
         st.error("❌ ACCT_ID should be numeric only.")
     else:
-        # Find matching account
         match = df[df["ACCT_ID"] == acct_id]
         if match.empty:
             st.error("❌ ACCT_ID not found.")
@@ -83,25 +90,42 @@ if acct_id:
                         uploaded = st.file_uploader(f"Upload {field}", type=["png", "jpg", "jpeg"], key=field)
                         if uploaded:
                             try:
-                                # Verify it's an image
+                                # Verify image
                                 Image.open(uploaded)
-                                filename = f"{acct_id}{field.replace(' ', '')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{uploaded.name.split('.')[-1]}"
-                                media = MediaIoBaseUpload(io.BytesIO(uploaded.getvalue()), mimetype=uploaded.type)
+                                # Prepare upload
+                                file_ext = uploaded.name.split('.')[-1].lower()
+                                filename = f"{acct_id}{field.replace(' ', '')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+                                
+                                # Upload to Drive
+                                media = MediaIoBaseUpload(
+                                    io.BytesIO(uploaded.getvalue()),
+                                    mimetype=f"image/{file_ext}" if file_ext in ['jpg', 'jpeg', 'png'] else 'application/octet-stream'
+                                )
+                                
+                                file_metadata = {
+                                    'name': filename,
+                                    'parents': [DRIVE_FOLDER_ID]
+                                }
+                                
                                 file = drive_service.files().create(
                                     media_body=media,
-                                    body={'name': filename, 'parents': [DRIVE_FOLDER_ID]},
-                                    fields='webViewLink'
+                                    body=file_metadata,
+                                    fields='webViewLink,id'
                                 ).execute()
+                                
                                 image_links[field] = file.get("webViewLink")
-                            except Exception as e:
-                                st.error(f"⚠️ Failed to process {field}: {e}")
+                                st.success(f"Uploaded {field} successfully!")
+                                
+                            except HttpError as http_err:
+                                st.error(f"Google Drive API error: {http_err}")
+                            except Exception as upload_err:
+                                st.error(f"Upload failed: {upload_err}")
                     else:
                         val = st.text_input(field)
                         if val:
                             input_data[field.replace(" ", "_").upper()] = val.strip()
 
                 if st.button("✅ Submit"):
-                    # --- Validation ---
                     errors = []
                     if not mobile_no or not mobile_no.isdigit() or len(mobile_no) != 10:
                         errors.append("Valid 10-digit mobile number is required.")
@@ -119,6 +143,7 @@ if acct_id:
                         for e in errors:
                             st.error("❌ " + e)
                     else:
+                        # Prepare data row
                         row = [
                             acct_id,
                             selected_remark,
@@ -134,12 +159,30 @@ if acct_id:
                             image_links.get("METER IMAGE", ""),
                             image_links.get("PREMISES IMAGE", ""),
                             image_links.get("DOCUMENT RELATED TO PDC", ""),
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Timestamp
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         ]
 
+                        # Debug output
+                        st.write("Data to be saved:", row)
+                        
+                        # Attempt to save to Google Sheets
                         try:
-                            sheet.append_row(row)
-                            st.success("🎉 Data saved to Google Sheet & images uploaded to Drive!")
+                            # First verify we can access the sheet
+                            sheet.append_row(["Test connection"], value_input_option="RAW")
+                            sheet.delete_rows(2)  # Remove test row
+                            
+                            # Now insert real data
+                            sheet.append_row(row, value_input_option="USER_ENTERED")
+                            
+                            st.success("🎉 Data saved to Google Sheet successfully!")
                             st.balloons()
-                        except Exception as e:
-                            st.error(f"❌ Failed to save to Google Sheet: {e}")
+                            time.sleep(2)
+                            st.experimental_rerun()  # Clear the form
+                            
+                        except HttpError as http_err:
+                            st.error(f"Google Sheets API error: {http_err}")
+                            st.error(f"Details: {http_err.content.decode()}")
+                        except gspread.exceptions.APIError as gs_err:
+                            st.error(f"Gspread error: {gs_err}")
+                        except Exception as save_error:
+                            st.error(f"Failed to save data: {save_error}")
