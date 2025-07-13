@@ -1,31 +1,37 @@
-# ✅ Survey_IDF_Data_1.py
+# ✅ FIXED VERSION: Streamlit app with Google Sheets + Drive integration WITHOUT PyDrive
+
 import streamlit as st
 import pandas as pd
+import os
 from datetime import datetime
-from pydrive.auth import GoogleAuth
-from pydrive.drive import GoogleDrive
-import gspread
-from google.oauth2.service_account import Credentials
+import io
+from PIL import Image
 
-# --- CONFIG ---
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
+import gspread
+
+# --- Google Setup ---
+CREDENTIALS_FILE = 'credentials.json'
 GOOGLE_SHEET_ID = '1UGrGEtWy5coI7nduIY8J8Vjh9S0Ahej7ekDG_4nl-SQ'
 DRIVE_FOLDER_ID = '1l6N7Gfd8T1V8t3hR2OuLn5CDtBuzjsKu'
-CREDENTIALS_FILE = 'credentials.json'
 
-# --- GOOGLE AUTH ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scope)
-client = gspread.authorize(credentials)
-sheet = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+SCOPES = ["https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
+creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES)
 
-gauth = GoogleAuth()
-gauth.DEFAULT_SETTINGS['client_config_file'] = CREDENTIALS_FILE
-gauth.LocalWebserverAuth()
-drive = GoogleDrive(gauth)
+# --- Google Drive Setup ---
+drive_service = build("drive", "v3", credentials=creds)
 
-# --- Load CSV ---
-df = pd.read_csv("IDF_ACCT_ID.csv")
+# --- Google Sheets Setup ---
+gs_client = gspread.authorize(creds)
+sheet = gs_client.open_by_key(GOOGLE_SHEET_ID).sheet1
 
+# --- Load Local CSV for ACCT_ID Validation ---
+input_file = 'IDF_ACCT_ID.csv'
+df = pd.read_csv(input_file)
+
+# --- UI Starts ---
 st.title("Supervisor Field Survey – IDF Cases")
 st.caption("Please fill this form after on-site verification of IDF accounts.")
 
@@ -35,6 +41,7 @@ if acct_id_input and not acct_id_input.isdigit():
 
 if acct_id_input:
     match = df[df["ACCT_ID"].astype(str) == acct_id_input.strip()]
+
     if not match.empty:
         st.success("✅ ACCT_ID matched. Details below:")
         fields = {
@@ -62,26 +69,29 @@ if acct_id_input:
         if selected_remark:
             mobile_no = st.text_input("Enter Consumer Mobile Number (10 digits)", max_chars=10)
             input_data = {}
-            uploaded_images = {}
+            uploaded_links = {}
 
             for field in remark_options[selected_remark]:
                 if "IMAGE" in field or "DOCUMENT" in field:
-                    uploaded = st.file_uploader(f"Upload {field}", type=["jpg", "jpeg", "png"], key=field)
-                    if uploaded:
-                        uploaded_images[field] = uploaded
+                    image = st.file_uploader(f"Upload {field}", type=["png", "jpg", "jpeg"], key=field)
+                    if image:
+                        filename = f"{acct_id_input}_{field.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+                        media = MediaIoBaseUpload(image, mimetype='image/png')
+                        uploaded_file = drive_service.files().create(
+                            media_body=media,
+                            body={
+                                'name': filename,
+                                'parents': [DRIVE_FOLDER_ID],
+                                'mimeType': 'image/png'
+                            },
+                            fields='id, webViewLink'
+                        ).execute()
+                        uploaded_links[field] = uploaded_file.get("webViewLink")
                 else:
                     value = st.text_input(field)
                     input_data[field.replace(" ", "_").upper()] = value
 
             if st.button("✅ Submit"):
-                uploaded_links = {}
-                for field, file_data in uploaded_images.items():
-                    filename = f"{acct_id_input}_{field.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
-                    file_drive = drive.CreateFile({'title': filename, 'parents': [{'id': DRIVE_FOLDER_ID}]})
-                    file_drive.SetContentString(file_data.read().decode("ISO-8859-1"))
-                    file_drive.Upload()
-                    uploaded_links[field] = file_drive['alternateLink']
-
                 row = [
                     acct_id_input,
                     selected_remark,
@@ -90,7 +100,7 @@ if acct_id_input:
                     fields["DIVISION"],
                     fields["SUB-DIVISION"],
                     mobile_no,
-                    "",
+                    "",  # REQUIRED_REMARK placeholder
                     input_data.get("METER_SERIAL_NUMBER", ""),
                     input_data.get("READING", ""),
                     input_data.get("DEMAND", ""),
@@ -99,6 +109,6 @@ if acct_id_input:
                     uploaded_links.get("DOCUMENT RELATED TO PDC", "")
                 ]
                 sheet.append_row(row)
-                st.success("🎉 Data saved successfully to Google Sheet & Drive!")
+                st.success("🎉 Data submitted and saved to Google Sheet + Drive!")
     else:
-        st.error("❌ ACCT_ID not found. Please try again.")
+        st.error("❌ ACCT_ID not found. Please check and try again.")
