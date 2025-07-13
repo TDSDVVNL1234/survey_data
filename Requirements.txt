@@ -1,8 +1,13 @@
+# requirements.txt (final version)
+
+# Core dependencies
 streamlit
 pandas
+Pillow
+
+# Google Sheets & Drive integration
 gspread
 google-auth
 google-auth-oauthlib
 google-auth-httplib2
-pydrive
-Pillow
+google-api-python-client
